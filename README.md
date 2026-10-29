@@ -5,7 +5,7 @@
 For a simple neural network lyaer: $z = Wx + b$, suppose weight matrix $W \in \mathbb{R}^{n \times n}$. For usual 16 bit floating point, loading in W requires $2n^2$ bytes. Usually, this weight matrix is too large to fit into the fast on chip cache. It usually resides in GPU VRAM (slower, larger), and is read back and forth to the chip (CPU) cache. Additionally, matrix multiplication for $Wx$ requires $2n^2$ FLOPs (floating point operations), as for each row of W, we compute:
 $$y_i = \sum_{j = 1}^{n} W_{ij}x_j$$
 
-It is clear that there are n additions and n - multplications for each row. Since there are n rows, we end up with
+It is clear that there are (n - 1) additions and n multplications for each row. Since there are n rows, we end up with
 
 $$ n(n + n - 1) \approx 2n^2 $$
 
@@ -23,11 +23,11 @@ $$I \approx \boxed{B \ \text{FLOPs/byte}}$$
 
 ### Small Batch Sizes
 
-For token inference at small batch sizes, loading model weights repeatedly from VRAM to on chip cache can limit performance as seen by the measure of arithmetic intensity given batch size B. We can either reduce the precision of the weights, but this can hurt accuracy.
+For token inference at small batch sizes, loading model weights repeatedly from VRAM to on chip cache can limit performance as seen by the measure of arithmetic intensity given batch size B. We can reduce the precision we operate at, but this can hurt accuracy.
 
 ## Our Proposal
 
-We can store the model's weights as 4-bit integers while keeping the activations as floating-point numbers during inference.
+We can store the model's weights as 4-bit integers while keeping the activations as floating-point numbers during inference. This should quadruple (16 divided by 4) our arithmetic intensity, ignoring bias.
 
 Consider layer:
 $$ Y = XW + b $$
@@ -84,3 +84,5 @@ $$
    - Output floating-point activations
    - We never recosntruct entire weight matrix in GPU memory!
 3. Replace selected linear layers in a pretrained Transformer with custom kernel and evaluate inference accuracy and speed. We can also benchmark our implementation against standard floating point matrix multplication and our pytorch reference.
+
+# Evaluation
