@@ -1,11 +1,11 @@
-"""Report weight and linear-output error for a reproducible synthetic layer."""
+"""Demonstrate only our custom quantizer; not an official PyTorch demo."""
 
 import argparse
 
 import torch
 from torch.nn import functional as F
 
-from quantization import dequantize_groupwise, linear_reference, quantize_groupwise
+from quantization.custom_symmetric import dequantize_groupwise, linear, quantize_groupwise
 
 
 def report_error(name: str, actual: torch.Tensor, expected: torch.Tensor) -> None:
@@ -32,12 +32,12 @@ def main() -> None:
 
     quantized = quantize_groupwise(weight, args.group_size)
     reconstructed = dequantize_groupwise(quantized)
-    actual = linear_reference(inputs, quantized, bias)
+    actual = linear(inputs, quantized, bias)
     expected = F.linear(inputs, weight, bias)
     print(f"Device={args.device}, dtype={args.dtype}, group_size={args.group_size}")
     report_error("Weights", reconstructed, weight)
     report_error("Linear output", actual, expected)
-    print("Reference uses unpacked int8 codes and materializes dequantized weights.")
+    print("Custom quantizer: unpacked int8 codes, full floating-point reconstruction.")
 
 
 if __name__ == "__main__":

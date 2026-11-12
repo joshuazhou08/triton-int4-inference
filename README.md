@@ -75,7 +75,7 @@ $$
 
 # Implementation
 
-1. We use a symmetric groupwise quantization reference implemented with PyTorch tensor operations (see below).
+1. Compare our custom symmetric groupwise quantizer against official TorchAO quantization functions (see below).
 
 2. We will write out own custom Triton GPU kernel.
    - Load packed 4-bit weights
@@ -85,71 +85,110 @@ $$
    - We never recosntruct entire weight matrix in GPU memory!
 3. Replace selected linear layers in a pretrained Transformer with custom kernel and evaluate inference accuracy and speed. We can also benchmark our implementation against standard floating point matrix multplication and our pytorch reference.
 
-# PyTorch reference
+# Project structure
 
-`quantization.py` implements the initial correctness baseline. It uses PyTorch's
-linear-layer layout, `weight.shape == [out_features, in_features]`, so the layer
-operation is `Y = X @ weight.T + bias`.
+```text
+quantization/
+    custom_symmetric.py          Our hand-written quantization math
+    torchao_reference.py         Adapter calling official TorchAO quantizers
+examples/
+    demo_custom_quantization.py  Demonstrates only our custom implementation
+    compare_quantizers.py        Compares custom, TorchAO, and floating-point results
+tests/
+    test_custom_symmetric.py
+    test_torchao_reference.py
+requirements.txt                Pinned PyTorch/TorchAO dependencies
+```
 
-Each output row is split into contiguous groups along `in_features` (default
-group size: 128). For each group:
+The former `quantization.py` and `demo_quantization.py` were our own code,
+not official PyTorch examples. They have been moved and renamed as shown above.
+Import an implementation explicitly; both expose `quantize_groupwise`,
+`dequantize_groupwise`, and `linear`.
 
-$$s_g = \max_i |w_i| / 7, \qquad q_i = \operatorname{clip}(\operatorname{round}(w_i/s_g), -7, 7), \qquad \hat w_i = s_g q_i.$$
+## Custom quantizer and official reference
 
-This baseline uses the symmetric subset `[-7, 7]` of signed INT4; the code `-8`
-is unused. Rounding follows [PyTorch's ties-to-even convention](https://docs.pytorch.org/docs/stable/generated/torch.round.html).
-Scales and quantization arithmetic use FP32. All-zero groups use scale 1;
-nonzero scales are bounded below by the smallest normal FP32 value to avoid
-underflow. A short final group is supported without changing the returned
-weight shape. Group offsets and outlier handling are future extensions.
+Both use weights shaped `[out_features, in_features]`, with contiguous groups
+along each row (default size 128), and compute `Y = X @ weight.T + bias`.
 
-Quantized weights have **4-bit values but currently use 8-bit storage**:
-each code in `[-7, 7]` occupies one byte in a `torch.int8` tensor, plus four
-bytes per group for scales. `linear_reference` reconstructs floating-point
-weights on every call before applying [PyTorch's linear operation](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.linear.html);
-the matrix multiplication uses floating-point weights, not int8 weights.
-This reference measures quantization error. Actual 4-bit storage will pack
-**two weights per byte**, with the future Triton kernel unpacking and rescaling
-them inside the kernel.
-Activations and layer bias remain floating point; decoded weights and bias use
-the activation dtype. FP16, BF16, and FP32 are supported. The functions are
-inference-only and do not track gradients.
+- **Custom:** implements `scale = max(abs(weights)) / 7`, rounding, clipping to
+  `[-7, 7]`, and reconstruction ourselves using torch tensor operations.
+- **TorchAO reference:** calls the official `choose_qparams_affine`,
+  `quantize_affine`, and `dequantize_affine` functions with
+  `MappingType.SYMMETRIC`, block size `(1, group_size)`, and explicit bounds
+  `[-7, 7]`. It never calls our custom quantizer. See the
+  [TorchAO primitives source for the pinned release](https://github.com/pytorch/ao/blob/v0.13.0/torchao/quantization/quant_primitives.py).
+
+The bounds deliberately match our custom algorithm, leaving INT4 code `-8`
+unused. This is an **official-library numerical reference configured for our
+experiment**, not TorchAO's default `Int4WeightOnlyConfig` or its packed inference
+kernel. Both paths use FP32 scales and quantization arithmetic, support partial
+final groups, and accept FP16, BF16, or FP32 weights and activations.
+The TorchAO adapter requires group size >= 2; the custom implementation also
+supports size 1. The adapter retains padded codes internally and crops decoded
+weights to their original shape.
+
+Small differences are expected: TorchAO retains its default FP32 epsilon floor
+for scales (`~1.19e-7`), whereas our custom code uses the smallest normal FP32
+value for nonzero groups and scale 1 for zero groups. Both reconstruct zero
+groups as zero, but very small nonzero weights can differ. Floating-point
+rounding near quantization thresholds can also produce different integer codes.
+The comparison reports these differences rather than assuming exact equality.
+
+## Storage and computation
+
+**4-bit values currently use 8-bit storage:** each code occupies one byte in
+an unpacked `torch.int8` tensor. Scales add four bytes per group; the TorchAO
+reference also retains its INT32 zero points and any padding. Each `linear`
+function reconstructs the full floating-point weights before multiplication.
+Activations and bias remain floating point, and decoding uses the activation
+dtype. Both implementations are inference-only and do not track gradients.
+
+Actual 4-bit storage will pack **two weights per byte**. The future Triton kernel
+will unpack and rescale inside the kernel. These numerical references do not
+measure that kernel's speed or memory savings.
 
 ## Setup and usage
 
-Requires Python 3.10+ and PyTorch. Install a CUDA-enabled PyTorch build if running
-on a GPU; the reference and its tests also run on CPU.
+Use Python 3.10–3.13. Dependencies pin PyTorch 2.8.0 and TorchAO 0.13.0, a
+[compatible release pair](https://github.com/pytorch/ao/issues/2919).
+Run commands from the project root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python demo_quantization.py
-# With a CUDA-enabled PyTorch installation:
-python demo_quantization.py --device cuda --group-size 64
+
+# Official TorchAO vs our custom implementation, using identical inputs:
+python -m examples.compare_quantizers
+
+# Our custom implementation alone:
+python -m examples.demo_custom_quantization
+
+# Requires a CUDA-enabled PyTorch installation and an accessible GPU:
+python -m examples.compare_quantizers --device cuda --group-size 64
 ```
 
 ```python
 import torch
-from quantization import quantize_groupwise, dequantize_groupwise, linear_reference
+from quantization import torchao_reference
 
 layer = torch.nn.Linear(512, 256, dtype=torch.float16)
 x = torch.randn(4, 512, dtype=torch.float16)
-quantized = quantize_groupwise(layer.weight, group_size=128)
-weight_hat = dequantize_groupwise(quantized)
-y = linear_reference(x, quantized, layer.bias)
+quantized = torchao_reference.quantize_groupwise(layer.weight, group_size=128)
+weight_hat = torchao_reference.dequantize_groupwise(quantized)
+y = torchao_reference.linear(x, quantized, layer.bias)
 ```
 
-Keep activations, weights, and bias on the same device. The returned
-`GroupwiseInt4` holds `qweight`, `scales`, `group_size`, and the original `dtype`.
-The demo reports weight reconstruction and linear-output MSE, maximum absolute
-error, and relative L2 error against the unquantized layer with a fixed seed.
+Keep weights, activations, and bias on the same device. To use our implementation,
+import `custom_symmetric` instead. The comparison prints dependency versions,
+weight/output errors against the original floating-point layer, errors between
+the two quantizers, and integer code mismatches, using a fixed random seed.
 
 # Evaluation
 
-The unit tests cover known quantization results, rounding, independent row
-groups, partial groups, zeros, the half-scale reconstruction error bound,
-noncontiguous weights, and linear outputs with and without bias. CUDA checks
-run when available. The synthetic demo measures numerical error only; model
-accuracy and inference timing remain to be evaluated after kernel integration.
+Tests cover hand-calculated results, rounding, partial groups, noncontiguous
+weights, zero/tiny groups, reconstruction error, and floating-point linear
+outputs. They also compare our algorithm against actual TorchAO calls. CUDA
+tests run when available. Model accuracy, packed storage, and optimized inference
+timing remain future work.

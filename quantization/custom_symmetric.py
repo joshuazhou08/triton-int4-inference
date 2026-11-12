@@ -1,4 +1,4 @@
-"""PyTorch correctness reference for symmetric groupwise INT4 weights.
+"""Our hand-written symmetric groupwise INT4 quantizer, using torch tensors.
 
 Weights follow nn.Linear's [out_features, in_features] layout. Integer codes
 are stored unpacked in int8; this module does not implement packed storage or
@@ -80,7 +80,7 @@ def dequantize_groupwise(
 
 
 @torch.no_grad()
-def linear_reference(
+def linear(
     inputs: Tensor, quantized: GroupwiseInt4, bias: Tensor | None = None
 ) -> Tensor:
     """Compute inputs @ dequantized_weight.T + bias without quantizing inputs.

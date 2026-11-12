@@ -4,10 +4,12 @@ import unittest
 import torch
 from torch.nn import functional as F
 
-from quantization import dequantize_groupwise, linear_reference, quantize_groupwise
+from quantization.custom_symmetric import (
+    dequantize_groupwise, linear, quantize_groupwise,
+)
 
 
-class QuantizationTests(unittest.TestCase):
+class CustomSymmetricTests(unittest.TestCase):
     def test_known_groups_and_rounding(self):
         weight = torch.tensor([[-7., -2.5, 0.5, 7., -14., -3., 3., 14.]])
         quantized = quantize_groupwise(weight, 4)
@@ -62,7 +64,7 @@ class QuantizationTests(unittest.TestCase):
             inputs = torch.arange(math.prod(shape), device=device, dtype=dtype)
             inputs = inputs.reshape(shape) / 8
             for layer_bias in (None, bias):
-                actual = linear_reference(inputs, quantized, layer_bias)
+                actual = linear(inputs, quantized, layer_bias)
                 self.assertEqual(actual.dtype, dtype)
                 torch.testing.assert_close(actual, F.linear(inputs, weight, layer_bias))
 
@@ -95,7 +97,7 @@ class QuantizationTests(unittest.TestCase):
         bias = torch.tensor([0.5, -0.5])
         decoded = torch.tensor([[7., 0., -2.6], [14., 2., 0.]], dtype=torch.float16)
         expected = F.linear(inputs, decoded, bias.half())
-        torch.testing.assert_close(linear_reference(inputs, quantized, bias), expected)
+        torch.testing.assert_close(linear(inputs, quantized, bias), expected)
 
     def test_invalid_inputs(self):
         for group_size in (0, -1, 2.5, True):
@@ -112,11 +114,11 @@ class QuantizationTests(unittest.TestCase):
             quantize_groupwise(torch.ones(2, 3, dtype=torch.int32))
         quantized = quantize_groupwise(torch.ones(2, 3))
         with self.assertRaises(ValueError):
-            linear_reference(torch.ones(4, 5), quantized)
+            linear(torch.ones(4, 5), quantized)
         with self.assertRaises(ValueError):
-            linear_reference(torch.ones(4, 3), quantized, torch.ones(3))
+            linear(torch.ones(4, 3), quantized, torch.ones(3))
         with self.assertRaises(TypeError):
-            linear_reference(torch.ones(4, 3, dtype=torch.int32), quantized)
+            linear(torch.ones(4, 3, dtype=torch.int32), quantized)
         with self.assertRaises(TypeError):
             dequantize_groupwise(quantized, dtype=torch.int8)
 
