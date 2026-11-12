@@ -75,7 +75,7 @@ $$
 
 # Implementation
 
-1. We will use Pytorch's symmetric groupwise quantization as a reference.
+1. We use a symmetric groupwise quantization reference implemented with PyTorch tensor operations (see below).
 
 2. We will write out own custom Triton GPU kernel.
    - Load packed 4-bit weights
@@ -85,4 +85,71 @@ $$
    - We never recosntruct entire weight matrix in GPU memory!
 3. Replace selected linear layers in a pretrained Transformer with custom kernel and evaluate inference accuracy and speed. We can also benchmark our implementation against standard floating point matrix multplication and our pytorch reference.
 
+# PyTorch reference
+
+`quantization.py` implements the initial correctness baseline. It uses PyTorch's
+linear-layer layout, `weight.shape == [out_features, in_features]`, so the layer
+operation is `Y = X @ weight.T + bias`.
+
+Each output row is split into contiguous groups along `in_features` (default
+group size: 128). For each group:
+
+$$s_g = \max_i |w_i| / 7, \qquad q_i = \operatorname{clip}(\operatorname{round}(w_i/s_g), -7, 7), \qquad \hat w_i = s_g q_i.$$
+
+This baseline uses the symmetric subset `[-7, 7]` of signed INT4; the code `-8`
+is unused. Rounding follows [PyTorch's ties-to-even convention](https://docs.pytorch.org/docs/stable/generated/torch.round.html).
+Scales and quantization arithmetic use FP32. All-zero groups use scale 1;
+nonzero scales are bounded below by the smallest normal FP32 value to avoid
+underflow. A short final group is supported without changing the returned
+weight shape. Group offsets and outlier handling are future extensions.
+
+Quantized weights have **4-bit values but currently use 8-bit storage**:
+each code in `[-7, 7]` occupies one byte in a `torch.int8` tensor, plus four
+bytes per group for scales. `linear_reference` reconstructs floating-point
+weights on every call before applying [PyTorch's linear operation](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.linear.html);
+the matrix multiplication uses floating-point weights, not int8 weights.
+This reference measures quantization error. Actual 4-bit storage will pack
+**two weights per byte**, with the future Triton kernel unpacking and rescaling
+them inside the kernel.
+Activations and layer bias remain floating point; decoded weights and bias use
+the activation dtype. FP16, BF16, and FP32 are supported. The functions are
+inference-only and do not track gradients.
+
+## Setup and usage
+
+Requires Python 3.10+ and PyTorch. Install a CUDA-enabled PyTorch build if running
+on a GPU; the reference and its tests also run on CPU.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+python demo_quantization.py
+# With a CUDA-enabled PyTorch installation:
+python demo_quantization.py --device cuda --group-size 64
+```
+
+```python
+import torch
+from quantization import quantize_groupwise, dequantize_groupwise, linear_reference
+
+layer = torch.nn.Linear(512, 256, dtype=torch.float16)
+x = torch.randn(4, 512, dtype=torch.float16)
+quantized = quantize_groupwise(layer.weight, group_size=128)
+weight_hat = dequantize_groupwise(quantized)
+y = linear_reference(x, quantized, layer.bias)
+```
+
+Keep activations, weights, and bias on the same device. The returned
+`GroupwiseInt4` holds `qweight`, `scales`, `group_size`, and the original `dtype`.
+The demo reports weight reconstruction and linear-output MSE, maximum absolute
+error, and relative L2 error against the unquantized layer with a fixed seed.
+
 # Evaluation
+
+The unit tests cover known quantization results, rounding, independent row
+groups, partial groups, zeros, the half-scale reconstruction error bound,
+noncontiguous weights, and linear outputs with and without bias. CUDA checks
+run when available. The synthetic demo measures numerical error only; model
+accuracy and inference timing remain to be evaluated after kernel integration.
